@@ -2,3 +2,8 @@ manpage.patch
 buildsystem.patch
 smem-py3k.patch
 smem-xrange-fix.patch
+gdh-bugfixes.patch
+gdh-name-comm-widths.patch
+gdh-smaps-rollup.patch
+gdh-extra-columns.patch
+gdh-report-filter-options.patch

@@ -1,0 +1,118 @@
+Description: Fix AVGUSS, user VSS, packed kernels, and Python 3 captures
+ The mapping report's AVGUSS column read a USS key that maptotals() never
+ stored, so -c avguss crashed. The user report's VSS column printed PSS.
+ -K treated a compressed or data-less image as a valid kernel size and
+ scanned it as text, which does not work on Python 3. smemcap tarballs
+ are binary, so --source could not parse them under Python 3; archive
+ reads are decoded as text, and missing capture files are skipped.
+Origin: vendor, adapted from https://github.com/G-dH/smem
+Forwarded: no
+Author: Hualet Wang <mr.asianwang@gmail.com>
+
+--- a/smem
++++ b/smem
+@@ -80,6 +80,12 @@
+                 self._gcache[gid] = str(gid)
+         return self._gcache[gid]
+ 
++def _astext(data):
++    '''Normalize proc or tar bytes to text. smemcap tarballs are binary in Python 3.'''
++    if isinstance(data, bytes):
++        return data.decode('utf-8', 'surrogateescape')
++    return data
++
+ class tardata(procdata):
+     def __init__(self, source):
+         procdata.__init__(self, source)
+@@ -90,9 +96,12 @@
+                 d,f = ti.name.split('/')
+                 yield d
+     def _read(self, f):
+-        return self.tar.extractfile(f).read()
++        member = self.tar.extractfile(f)
++        if member is None:
++            raise IOError(errno.ENOENT, 'missing from capture', f)
++        return _astext(member.read())
+     def _readlines(self, f):
+-        return self.tar.extractfile(f).readlines()
++        return self._read(f).splitlines(True)
+     def piduser(self, p):
+         t = self.tar.getmember("%d" % p)
+         if t.uname:
+@@ -123,19 +132,22 @@
+     global _kernelsize
+     if not _kernelsize and options.kernel:
+         try:
+-            d = os.popen("size %s" % options.kernel).readlines()[1]
+-            _kernelsize = int(d.split()[3]) / 1024
+-        except:
+-            try:
+-                # try some heuristic to find gzipped part in kernel image
+-                packedkernel = open(options.kernel).read()
+-                pos = packedkernel.find('\x1F\x8B')
+-                if pos >= 0 and pos < 25000:
++            d = os.popen("size %s" % options.kernel).readlines()[1].split()
++            # A zero data segment means `size` did not see a real ELF image
++            # (typically a compressed vmlinuz). Do not report that as the
++            # kernel image size. Adapted from G-dH/smem.
++            if int(d[1]) == 0:
++                packedkernel = open(options.kernel, 'rb').read()
++                pos = packedkernel.find(b'\x1F\x8B')
++                if pos >= 0 and pos < 25000 and not getattr(options, 'quiet', False):
++                    sys.stderr.write("Parameter '%s' should be an original uncompressed compiled kernel file.\n" % options.kernel)
+                     sys.stderr.write("Maybe uncompressed kernel can be extracted by the command:\n"
+                             "  dd if=%s bs=1 skip=%d | gzip -d >%s.unpacked\n\n" % (options.kernel, pos, options.kernel))
+-            except:
+-                pass
+-            sys.stderr.write("Parameter '%s' should be an original uncompressed compiled kernel file.\n\n" % options.kernel)
++            else:
++                _kernelsize = int(int(d[3]) / 1024 + 0.5)
++        except:
++            if not getattr(options, 'quiet', False):
++                sys.stderr.write("Parameter '%s' should be an original uncompressed compiled kernel file.\n\n" % options.kernel)
+     return _kernelsize
+ 
+ def pidmaps(pid):
+@@ -352,7 +364,8 @@
+         avgpss=('AVGPSS', lambda n: int(1.0 * pt[n]['pss']/pt[n]['pids']),
+                 '% 8a', sum,
+                 'average PSS per PID'),
+-        avguss=('AVGUSS', lambda n: int(1.0 * pt[n]['uss']/pt[n]['pids']),
++        avguss=('AVGUSS', lambda n: int(1.0 * (pt[n]['private_clean']
++             + pt[n]['private_dirty']) / pt[n]['pids']),
+                 '% 8a', sum,
+                 'average USS per PID'),
+         avgrss=('AVGRSS', lambda n: int(1.0 * pt[n]['rss']/pt[n]['pids']),
+@@ -414,7 +427,7 @@
+              'resident set size (ignoring sharing)'),
+         pss=('PSS', lambda n: pt[n]['pss'], '% 8a', sum,
+              'proportional set size (including sharing)'),
+-        vss=('VSS', lambda n: pt[n]['pss'], '% 8a', sum,
++        vss=('VSS', lambda n: pt[n]['size'], '% 8a', sum,
+              'virtual set size (total virtual memory mapped)'),
+         )
+     columns = options.columns or 'user count swap uss pss rss'
+--- a/smemcap.c
++++ b/smemcap.c
+@@ -56,7 +56,12 @@
+ 
+ 	/* buffer and stat the file */
+ 	fd = open(path, O_RDONLY);
+-	fstat(fd, &s);
++	if (fd < 0)
++		return 0;
++	if (fstat(fd, &s) < 0) {
++		close(fd);
++		return 0;
++	}
+ 
+ 	do {
+ 		cur = calloc(1, sizeof(struct fileblock));
+@@ -80,6 +85,7 @@
+ 		cur = cur->next;
+ 		free(start);
+ 	}
++	return 0;
+ }
+ 
+ int archivejoin(const char *sub, const char *name, int destfd)

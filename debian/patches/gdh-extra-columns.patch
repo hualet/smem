@@ -1,0 +1,248 @@
+Description: Add SwapPss, TPSS, and anon/file/shmem columns
+ When the kernel exports them, process listings gain swappss, tpss
+ (PSS + SwapPss), pssa/pssf/psss (Pss_Anon/File/Shmem), and
+ rssa/rssf/rsss (RssAnon/File/Shmem from /proc/<pid>/status).
+ The mapping report gains avgvss, swappss, and tpss. Percentages for
+ SwapPss use SwapTotal. Missing metrics produce a warning.
+Origin: https://github.com/G-dH/smem
+Forwarded: no
+Author: Hualet Wang <mr.asianwang@gmail.com>
+
+--- a/smem
++++ b/smem
+@@ -136,6 +136,9 @@
+ 
+ _totalmem = 0
+ ROLLUP = False
++SWAPPSS = False
++PSSDETAIL = False
++RSSDETAIL = False
+ def totalmem():
+     global _totalmem
+     if not _totalmem:
+@@ -191,14 +194,40 @@
+                                offset=int(f[2], 16),
+                                device=f[3], inode=f[4], name=name)
+ 
+-    # smaps_rollup has no Size/VSS line; take VmSize from the process status.
+-    if ROLLUP and start is not None and 'size' not in maps.get(start, {}):
++    # Process-wide figures that are absent from a single mapping:
++    # VmSize (smaps_rollup has no VSS) and RssAnon/RssFile/RssShmem.
++    if start is not None and (ROLLUP or RSSDETAIL):
+         try:
+             for l in src._readlines('%d/status' % pid):
+                 f = l.split()
+-                if len(f) >= 2 and f[0] == 'VmSize:':
++                if len(f) < 2:
++                    continue
++                if ROLLUP and f[0] == 'VmSize:' and 'size' not in maps[start]:
+                     maps[start]['size'] = int(f[1])
+-                    break
++                elif f[0] == 'RssAnon:':
++                    maps[start]['rss_anon'] = int(f[1])
++                elif f[0] == 'RssFile:':
++                    maps[start]['rss_file'] = int(f[1])
++                elif f[0] == 'RssShmem:':
++                    maps[start]['rss_shmem'] = int(f[1])
++        except:
++            pass
++
++    # Pss_Anon/File/Shmem are published in smaps_rollup. When the report
++    # needed the full smaps file, copy those totals onto one mapping so
++    # process and user sums still see them once.
++    if start is not None and (not ROLLUP) and PSSDETAIL:
++        try:
++            for l in src._readlines('%d/smaps_rollup' % pid):
++                f = l.split()
++                if len(f) < 2:
++                    continue
++                if f[0] == 'Pss_Anon:':
++                    maps[start]['pss_anon'] = int(f[1])
++                elif f[0] == 'Pss_File:':
++                    maps[start]['pss_file'] = int(f[1])
++                elif f[0] == 'Pss_Shmem:':
++                    maps[start]['pss_shmem'] = int(f[1])
+         except:
+             pass
+ 
+@@ -270,19 +299,61 @@
+         return own
+     return entries[0] if entries else None
+ 
++def _zero_extra(t, swappss=True, pssdetail=True, rssdetail=True):
++    if swappss and SWAPPSS:
++        t['swappss'] = 0
++    if pssdetail and PSSDETAIL:
++        t['pss_anon'] = 0
++        t['pss_file'] = 0
++        t['pss_shmem'] = 0
++    if rssdetail and RSSDETAIL:
++        t['rss_anon'] = 0
++        t['rss_file'] = 0
++        t['rss_shmem'] = 0
++    return t
++
+ def setdatasources():
+-    '''Choose smaps vs smaps_rollup for this report.'''
+-    global ROLLUP
++    '''Choose smaps vs smaps_rollup and detect optional kernel metrics.'''
++    global ROLLUP, SWAPPSS, PSSDETAIL, RSSDETAIL
+     ROLLUP = True
++    SWAPPSS = False
++    PSSDETAIL = False
++    RSSDETAIL = False
+     probe = _probe_pid()
+     if probe is None:
+         ROLLUP = False
+         return
+     try:
+-        if not src._readlines('%d/smaps_rollup' % probe):
+-            ROLLUP = False
++        status = src._readlines('%d/status' % probe)
+     except:
++        status = []
++    for l in status:
++        if l.startswith('RssAnon:'):
++            RSSDETAIL = True
++            break
++    try:
++        rollup = src._readlines('%d/smaps_rollup' % probe)
++    except:
++        rollup = []
++    if not rollup:
+         ROLLUP = False
++    for l in rollup:
++        if l.startswith('SwapPss:'):
++            SWAPPSS = True
++        elif l.startswith('Pss_Anon:'):
++            PSSDETAIL = True
++    if not SWAPPSS:
++        try:
++            for l in src._readlines('%d/smaps' % probe):
++                if l.startswith('SwapPss:'):
++                    SWAPPSS = True
++                    break
++        except:
++            pass
++    if not SWAPPSS and not getattr(options, 'quiet', False):
++        sys.stderr.write('warning: kernel does not appear to support SwapPss measurement\n')
++    if not PSSDETAIL and not getattr(options, 'quiet', False):
++        sys.stderr.write('warning: kernel does not appear to support Pss_Anon/Pss_File/Pss_Shmem measurement\n')
+     columns = options.columns or ''
+     # Per-mapping data and a real mapping count need the full smaps file.
+     if (options.mapfilter or options.mappings or 'maps' in columns.split()):
+@@ -331,6 +402,7 @@
+     maps = pidmaps(pid)
+     t = dict(size=0, rss=0, pss=0, shared_clean=0, shared_dirty=0,
+              private_clean=0, private_dirty=0, referenced=0, swap=0)
++    _zero_extra(t)
+     for m in maps:
+         for k in t:
+             t[k] += maps[m].get(k, 0)
+@@ -388,6 +460,25 @@
+         vss=('VSS', lambda n: pt[n]['size'], '% 8a', sum,
+              'virtual set size (total virtual memory mapped)'),
+         )
++    if SWAPPSS:
++        fields['swappss'] = ('SwapPss', lambda n: pt[n]['swappss'], '% 8a', sum,
++                             'proportional swap (SwapPss)')
++        fields['tpss'] = ('TPSS', lambda n: pt[n]['pss'] + pt[n]['swappss'],
++                          '% 8a', sum, 'PSS + SwapPss')
++    if PSSDETAIL:
++        fields['pssa'] = ('PssAnon', lambda n: pt[n]['pss_anon'], '% 8a', sum,
++                          'PSS of anonymous memory')
++        fields['pssf'] = ('PssFile', lambda n: pt[n]['pss_file'], '% 8a', sum,
++                          'PSS of file mappings')
++        fields['psss'] = ('PssShmem', lambda n: pt[n]['pss_shmem'], '% 8a', sum,
++                          'PSS of shared memory')
++    if RSSDETAIL:
++        fields['rssa'] = ('RssAnon', lambda n: pt[n]['rss_anon'], '% 8a', sum,
++                          'RSS of anonymous memory')
++        fields['rssf'] = ('RssFile', lambda n: pt[n]['rss_file'], '% 8a', sum,
++                          'RSS of file mappings')
++        fields['rsss'] = ('RssShmem', lambda n: pt[n]['rss_shmem'], '% 8a', sum,
++                          'RSS of shared memory')
+     columns = options.columns or 'pid user command swap uss pss rss'
+ 
+     showtable(pt.keys(), fields, columns.split(), options.sort or 'pss')
+@@ -407,6 +498,7 @@
+                     t = dict(size=0, rss=0, pss=0, shared_clean=0,
+                              shared_dirty=0, private_clean=0, count=0,
+                              private_dirty=0, referenced=0, swap=0, pids=0)
++                    _zero_extra(t, pssdetail=False, rssdetail=False)
+                 else:
+                     t = totals[name]
+ 
+@@ -454,7 +546,15 @@
+         avgrss=('AVGRSS', lambda n: int(1.0 * pt[n]['rss']/pt[n]['pids']),
+                 '% 8a', sum,
+                 'average RSS per PID'),
++        avgvss=('AVGVSS', lambda n: int(1.0 * pt[n]['size']/pt[n]['pids']),
++                '% 8a', sum,
++                'average VSS per PID'),
+         )
++    if SWAPPSS:
++        fields['swappss'] = ('SwapPss', lambda n: pt[n]['swappss'], '% 8a', sum,
++                             'proportional swap (SwapPss)')
++        fields['tpss'] = ('TPSS', lambda n: pt[n]['pss'] + pt[n]['swappss'],
++                          '% 8a', sum, 'PSS + SwapPss')
+     columns = options.columns or 'map pids avgpss pss'
+ 
+     showtable(pt.keys(), fields, columns.split(), options.sort or 'pss')
+@@ -476,6 +576,7 @@
+             t = dict(size=0, rss=0, pss=0, shared_clean=0,
+                      shared_dirty=0, private_clean=0, count=0,
+                      private_dirty=0, referenced=0, swap=0)
++            _zero_extra(t)
+         else:
+             t = totals[user]
+ 
+@@ -513,6 +614,11 @@
+         vss=('VSS', lambda n: pt[n]['size'], '% 8a', sum,
+              'virtual set size (total virtual memory mapped)'),
+         )
++    if SWAPPSS:
++        fields['swappss'] = ('SwapPss', lambda n: pt[n]['swappss'], '% 8a', sum,
++                             'proportional swap (SwapPss)')
++        fields['tpss'] = ('TPSS', lambda n: pt[n]['pss'] + pt[n]['swappss'],
++                          '% 8a', sum, 'PSS + SwapPss')
+     columns = options.columns or 'user count swap uss pss rss'
+ 
+     showtable(pt.keys(), fields, columns.split(), options.sort or 'pss')
+@@ -634,7 +740,7 @@
+     for n in columns:
+         f = fields[n][2]
+         if 'a' in f:
+-            if n == 'swap':
++            if n in ('swap', 'swappss'):
+                 formatter.append(lambda x: showamount(x, st))
+             else:
+                 formatter.append(lambda x: showamount(x, mt))
+--- a/smem.8
++++ b/smem.8
+@@ -109,6 +109,25 @@
+ (falling back to the comm field in
+ .I /proc/<pid>/stat
+ when comm is unavailable).
++When the running kernel exports them, further columns are available:
++.B swappss
++and
++.B tpss
++(PSS + SwapPss),
++.B pssa
++/
++.B pssf
++/
++.B psss
++(PssAnon, PssFile, PssShmem),
++.B rssa
++/
++.B rssf
++/
++.B rsss
++(RssAnon, RssFile, RssShmem), and
++.B avgvss
++on the mapping report.
+ 
+ .TP
+ .BI "\-\-name-width=" N

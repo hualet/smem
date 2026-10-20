@@ -1,0 +1,220 @@
+Description: Add a comm Name column and configurable text widths
+ Process names now come from /proc/<pid>/comm, with the historic stat
+ comm field as a fallback for older captures. --name-width, --cmd-width,
+ --user-width, and --mapping-width set those columns; 0 prints the full
+ value and a positive width is not overridden by --autosize.
+ Behavior adapted from G-dH/smem and the smem2 rewrite.
+Origin: https://github.com/G-dH/smem
+Forwarded: no
+Author: Hualet Wang <mr.asianwang@gmail.com>
+
+--- a/smem
++++ b/smem
+@@ -3,6 +3,10 @@
+ # smem - a tool for meaningful memory reporting
+ #
+ # Copyright 2008-2009 Matt Mackall <mpm@selenic.com>
++# Name/comm column, column widths, smaps_rollup, extra memory columns,
++# and additional report/filter options adapted from G-dH
++# <https://github.com/G-dH/smem> and the smem2 rewrite
++# <https://github.com/slhck/smem2>.
+ #
+ # This software may be used and distributed according to the terms of
+ # the GNU General Public License version 2 or later, incorporated
+@@ -40,11 +44,15 @@
+     def version(self):
+         return self._readlines('version')[0]
+     def pidname(self, pid):
++        '''Process name (comm). Prefer /proc/<pid>/comm; fall back to stat.'''
+         try:
+-            l = self._read('%d/stat' % pid)
+-            return l[l.find('(') + 1: l.find(')')]
++            return self._read('%d/comm' % pid).strip()
+         except:
+-            return '?'
++            try:
++                l = self._read('%d/stat' % pid)
++                return l[l.find('(') + 1: l.find(')')]
++            except:
++                return '?'
+     def pidcmd(self, pid):
+         try:
+             c = self._read('%s/cmdline' % pid)[:-1]
+@@ -230,6 +238,27 @@
+ def pidusername(pid):
+     return src.username(src.piduser(pid))
+ 
++def pidtostr(pid):
++    return str(pid)
++
++ignore_autosize = set()
++
++def widthstr(field, width, default):
++    '''Format for a text column.
++
++    width < 0 uses the historical default. width == 0 prints the full
++    value. A positive width truncates and is left alone by --autosize.
++    Adapted from G-dH/smem.
++    '''
++    if width == 0:
++        return '%s'
++    if width < 0:
++        size = default
++    else:
++        size = width
++        ignore_autosize.add(field)
++    return '%%-%d.%ds' % (size, size)
++
+ def showamount(a, total):
+     if options.abbreviate:
+         return units(a * 1024)
+@@ -287,11 +316,14 @@
+     fields = dict(
+         pid=('PID', lambda n: n, '% 5s', lambda x: len(pt),
+              'process ID'),
+-        user=('User', showuser, '%-8s', lambda x: len(dict.fromkeys(x)),
++        user=('User', showuser, widthstr('user', options.user_width, 8),
++              lambda x: len(dict.fromkeys(x)),
+               'owner of process'),
+-        name=('Name', src.pidname, '%-24.24s', None,
+-              'name of process'),
+-        command=('Command', src.pidcmd, '%-27.27s', None,
++        name=('Name', src.pidname, widthstr('name', options.name_width, 15),
++              None,
++              'process name (comm)'),
++        command=('Command', src.pidcmd,
++                 widthstr('command', options.cmd_width, 27), None,
+                  'process command line'),
+         maps=('Maps',lambda n: pt[n]['maps'], '% 5s', sum,
+               'total number of mappings'),
+@@ -344,7 +376,8 @@
+     pt = maptotals(p)
+ 
+     fields = dict(
+-        map=('Map', lambda n: n, '%-40.40s', len,
++        map=('Map', lambda n: n, widthstr('map', options.mapping_width, 40),
++             len,
+              'mapping name'),
+         count=('Count', lambda n: pt[n]['count'], '% 5s', sum,
+                'number of mappings found'),
+@@ -414,7 +447,7 @@
+         return src.username(u)
+ 
+     fields = dict(
+-        user=('User', showuser, '%-8s', None,
++        user=('User', showuser, widthstr('user', options.user_width, 8), None,
+               'user name or ID'),
+         count=('Count', lambda n: pt[n]['count'], '% 5s', sum,
+                'number of processes'),
+@@ -487,6 +520,8 @@
+ def autosize(columns, fields, rows):
+     colsizes = {}
+     for c in columns:
++        if c in ignore_autosize:
++            continue
+         sizes = [1]
+ 
+         if not options.no_header:
+@@ -500,9 +535,13 @@
+ 
+         colsizes[c] = max(sizes)
+ 
+-    overflowcols = set(["command", "map"]) & set(columns)
+-    if len(overflowcols) > 0:
+-        overflowcol = overflowcols.pop()
++    overflowcol = None
++    for candidate in ('command', 'name', 'map'):
++        if (candidate in columns and candidate not in ignore_autosize
++                and candidate in colsizes):
++            overflowcol = candidate
++            break
++    if overflowcol:
+         totnoflow = sum(colsizes.values()) - colsizes[overflowcol]
+         try:
+             ttyrows, ttycolumns = os.popen('stty size', 'r').read().split()
+@@ -675,6 +714,14 @@
+                   help="disable header line")
+ parser.add_option("-c", "--columns", type="str",
+                   help="columns to show")
++parser.add_option("", "--name-width", type="int", default=-1,
++                  help="text width for process names (comm); 0=as needed")
++parser.add_option("", "--cmd-width", type="int", default=-1,
++                  help="text width for commands; 0=as needed")
++parser.add_option("", "--user-width", type="int", default=-1,
++                  help="text width for user names; 0=as needed")
++parser.add_option("", "--mapping-width", type="int", default=-1,
++                  help="text width for mapping names; 0=as needed")
+ parser.add_option("-t", "--totals", action="store_true",
+                   help="show totals")
+ parser.add_option("-a", "--autosize", action="store_true",
+@@ -723,6 +770,7 @@
+ defaults = {}
+ parser.set_defaults(**defaults)
+ (options, args) = parser.parse_args()
++ignore_autosize = set()
+ 
+ try:
+     src = tardata(options.source)
+--- a/smemcap.c
++++ b/smemcap.c
+@@ -114,6 +114,7 @@
+ 			archivejoin(de->d_name, "smaps", 1);
+ 			archivejoin(de->d_name, "cmdline", 1);
+ 			archivejoin(de->d_name, "stat", 1);
++			archivejoin(de->d_name, "comm", 1);
+ 		}
+ 
+ 	return 0;
+--- a/smem.8
++++ b/smem.8
+@@ -102,6 +102,41 @@
+ .TP
+ .BI "\-c " COLUMNS ", \-\-columns=" COLUMNS
+ Columns to show.
++The process listing accepts a
++.B name
++column, the process name from
++.I /proc/<pid>/comm
++(falling back to the comm field in
++.I /proc/<pid>/stat
++when comm is unavailable).
++
++.TP
++.BI "\-\-name-width=" N
++Width of the Name column.
++.B 0
++shows the name in full.
++The default width is 15.
++
++.TP
++.BI "\-\-cmd-width=" N
++Width of the Command column.
++.B 0
++shows the command in full.
++The default width is 27.
++
++.TP
++.BI "\-\-user-width=" N
++Width of the User column.
++.B 0
++shows the user name in full.
++The default width is 8.
++
++.TP
++.BI "\-\-mapping-width=" N
++Width of the Map column.
++.B 0
++shows the mapping name in full.
++The default width is 40.
+ 
+ .TP
+ .B \-H, \-\-no\-header
+@@ -179,6 +214,8 @@
+ .SH FILES
+ .I /proc/$pid/cmdline
+ .PP
++.I /proc/$pid/comm
++.PP
+ .I /proc/$pid/smaps
+ .PP
+ .I /proc/$pid/stat

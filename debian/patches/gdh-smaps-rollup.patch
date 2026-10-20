@@ -1,0 +1,125 @@
+Description: Use smaps_rollup for process and user totals
+ Linux 4.14+ publishes /proc/<pid>/smaps_rollup. Process and user reports
+ read that instead of every mapping, and take VSS from VmSize in
+ /proc/<pid>/status because the rollup has no Size line. Mapping reports,
+ --mapfilter, and the Maps column still read the full smaps file.
+ smemcap captures status and smaps_rollup when they exist.
+Origin: https://github.com/G-dH/smem
+Forwarded: no
+Author: Hualet Wang <mr.asianwang@gmail.com>
+
+--- a/smem
++++ b/smem
+@@ -36,6 +36,15 @@
+         return [int(e) for e in self._list()
+                 if e.isdigit() and not iskernel(e)]
+     def mapdata(self, pid):
++        # smaps_rollup (Linux 4.14+) is enough for process/user totals and
++        # is much cheaper than parsing every mapping. Adapted from G-dH/smem.
++        if ROLLUP:
++            try:
++                data = self._readlines('%s/smaps_rollup' % pid)
++                if data:
++                    return data
++            except:
++                pass
+         return self._readlines('%s/smaps' % pid)
+     def memdata(self):
+         if self._memdata is None:
+@@ -126,6 +135,7 @@
+         return self._gcache.get(g, str(g))
+ 
+ _totalmem = 0
++ROLLUP = False
+ def totalmem():
+     global _totalmem
+     if not _totalmem:
+@@ -181,6 +191,17 @@
+                                offset=int(f[2], 16),
+                                device=f[3], inode=f[4], name=name)
+ 
++    # smaps_rollup has no Size/VSS line; take VmSize from the process status.
++    if ROLLUP and start is not None and 'size' not in maps.get(start, {}):
++        try:
++            for l in src._readlines('%d/status' % pid):
++                f = l.split()
++                if len(f) >= 2 and f[0] == 'VmSize:':
++                    maps[start]['size'] = int(f[1])
++                    break
++        except:
++            pass
++
+     if not empty and not seen and not warned:
+         sys.stderr.write('warning: kernel does not appear to support PSS measurement\n')
+         warned = True
+@@ -238,6 +259,35 @@
+ def pidusername(pid):
+     return src.username(src.piduser(pid))
+ 
++def _probe_pid():
++    '''A pid that exists in the current data source, preferring this process.'''
++    try:
++        entries = [int(e) for e in src._list() if str(e).isdigit()]
++    except:
++        return None
++    own = os.getpid()
++    if own in entries:
++        return own
++    return entries[0] if entries else None
++
++def setdatasources():
++    '''Choose smaps vs smaps_rollup for this report.'''
++    global ROLLUP
++    ROLLUP = True
++    probe = _probe_pid()
++    if probe is None:
++        ROLLUP = False
++        return
++    try:
++        if not src._readlines('%d/smaps_rollup' % probe):
++            ROLLUP = False
++    except:
++        ROLLUP = False
++    columns = options.columns or ''
++    # Per-mapping data and a real mapping count need the full smaps file.
++    if (options.mapfilter or options.mappings or 'maps' in columns.split()):
++        ROLLUP = False
++
+ def pidtostr(pid):
+     return str(pid)
+ 
+@@ -777,6 +827,8 @@
+ except:
+     src = procdata(options.source)
+ 
++setdatasources()
++
+ try:
+     if options.mappings:
+         showmaps()
+--- a/smemcap.c
++++ b/smemcap.c
+@@ -115,6 +115,8 @@
+ 			archivejoin(de->d_name, "cmdline", 1);
+ 			archivejoin(de->d_name, "stat", 1);
+ 			archivejoin(de->d_name, "comm", 1);
++			archivejoin(de->d_name, "status", 1);
++			archivejoin(de->d_name, "smaps_rollup", 1);
+ 		}
+ 
+ 	return 0;
+--- a/smem.8
++++ b/smem.8
+@@ -218,8 +218,12 @@
+ .PP
+ .I /proc/$pid/smaps
+ .PP
++.I /proc/$pid/smaps_rollup
++.PP
+ .I /proc/$pid/stat
+ .PP
++.I /proc/$pid/status
++.PP
+ .I /proc/meminfo
+ .PP
+ .I /proc/version

@@ -29,5 +29,14 @@ License:
 On Debian systems, the complete text of the GNU General
 Public License can be found in `/usr/share/common-licenses/GPL-2'.
 
+
+Features added in Debian revision 1.5-4 (the Name/comm column, column
+width options, smaps_rollup support, extra PSS/RSS columns, and the
+additional report and filter options) are adapted from G-dH's smem
+<https://github.com/G-dH/smem> and the smem2 rewrite
+<https://github.com/slhck/smem2>. Those projects are distributed under
+the GNU General Public License version 2 or later, the same license as
+this package.
+
 The Debian packaging is Copyright (C) 2009, Michal Čihař
 <nijel@debian.org> and is licensed under the GPL, see above.

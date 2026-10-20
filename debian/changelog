@@ -1,3 +1,21 @@
+smem (1.5-3deepin1) unstable; urgency=medium
+
+  * Fix the mapping AVGUSS column, report real VSS in the user view,
+    ignore packed kernel images for -K, and decode smemcap tarballs
+    as text on Python 3.
+  * Add a Name column from /proc/<pid>/comm and --name-width,
+    --cmd-width, --user-width, and --mapping-width (0 = as needed).
+  * Use /proc/<pid>/smaps_rollup for process, user, and grouped reports.
+  * Add SwapPss, TPSS, PssAnon/PssFile/PssShmem, RssAnon/RssFile/RssShmem,
+    and AVGVSS when the kernel exports them.
+  * Add -g/--groupcmd, -b/--basename, -T/--totalsonly, -i/--ignorecase,
+    -W/--sysdetail, -q/--quiet, --pid, and -c all / -c +column.
+    Process filters match pid, comm, and command line.
+  * Behavior adapted from G-dH/smem and the smem2 rewrite. smem2's JSON
+    output and packaging rewrite are not included.
+
+ -- Hualet Wang <mr.asianwang@gmail.com>  Tue, 20 Oct 2026 14:37:00 +0000
+
 smem (1.5-3) unstable; urgency=medium
 
   * Team Upload
